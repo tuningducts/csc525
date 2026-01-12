@@ -59,6 +59,26 @@ def normalize_text(s: str) -> str:
 # ============================================================
 # Data + training helpers
 # ============================================================
+def delete_artifacts(outdir: str) -> tuple[bool, str]:
+    """
+    Delete saved model artifacts (pipeline + label encoder).
+    Returns (changed_anything, message).
+    """
+    p_model, p_le = model_paths(outdir)
+    deleted = []
+
+    for p in (p_model, p_le):
+        try:
+            if p.exists():
+                p.unlink()
+                deleted.append(str(p))
+        except Exception as e:
+            return False, f"Failed deleting {p}: {type(e).__name__}: {e}"
+
+    if not deleted:
+        return False, "No artifacts found to delete."
+    return True, "Deleted:\n- " + "\n- ".join(deleted)
+    
 def load_dataset(df: pd.DataFrame, group_col: Optional[str]) -> tuple[pd.Series, pd.Series, Optional[pd.Series]]:
     required = {"Question", "Intent"}
     missing = required - set(df.columns)
@@ -189,6 +209,23 @@ with st.sidebar:
     st.header("Settings")
 
     outdir = st.text_input("Artifacts directory", value="model")
+    st.subheader("Artifacts")
+    col_a, col_b = st.columns([1, 1])
+
+    with col_a:
+        if st.button("Delete artifacts", type="secondary"):
+            changed, msg = delete_artifacts(outdir)
+
+            # Clear in-session loaded model so we don't keep using stale objects
+            st.session_state.pop("pipeline", None)
+            st.session_state.pop("label_encoder", None)
+
+            if changed:
+                st.success(msg)
+            else:
+                st.info(msg)
+
+            st.rerun()
     st.divider()
 
     st.subheader("Training")
