@@ -29,7 +29,7 @@ MULTISPACE_RE = re.compile(r"\s+")
 
 
 # ============================================================
-# Text normalization 
+# Text normalization
 # ============================================================
 def normalize_text(s: str) -> str:
     """
@@ -160,15 +160,28 @@ def predict_intent(pipeline: Pipeline, le: LabelEncoder, text: str):
 
 
 def friendly_intent_line(intent: str, conf: float) -> str:
-    pct = conf * 100.0
-    # Simple, human-friendly phrasing (adjust to match your 7-intent set if you want)
-    return f"I think you’re asking about **{intent}** (confidence: **{pct:.1f}%**)."
+    return f"Sounds like you’re asking about **{intent}** (confidence: **{conf*100:.1f}%**)."
+
+
+def confidence_interval_label(conf: float) -> str:
+    """
+    Simple human-readable confidence bucket for logging.
+    """
+    if conf < 0.30:
+        return "Very low (<30%)"
+    if conf < 0.50:
+        return "Low (30–49%)"
+    if conf < 0.70:
+        return "Medium (50–69%)"
+    if conf < 0.85:
+        return "High (70–84%)"
+    return "Very high (85%+)"
 
 
 # ============================================================
 # Streamlit UI
 # ============================================================
-st.set_page_config(page_title="NFL Stats Chatbot", page_icon="🏈", layout="centered")
+st.set_page_config(page_title="NFL Stats Chatbot", layout="centered")
 st.title("NFL Statistics Chatbot")
 st.caption("Retrieval Chatbot for NFL stats questions")
 
@@ -191,10 +204,11 @@ with st.sidebar:
     max_iter = st.slider("LogReg max_iter", 500, 6000, 3000, 500)
 
     st.divider()
+    conf_threshold = st.slider("Confidence threshold (fallback below this)", 0.0, 0.95, 0.60, 0.01)
     show_debug = st.checkbox("Show debug panel (top-3)", value=False)
 
 
-tab_train, tab_chat = st.tabs(["Train", "Chat"])
+tab_train, tab_chat, tab_log = st.tabs(["Train", "Chat", "Fallback Log"])
 
 
 # ----------------------------
@@ -202,7 +216,7 @@ tab_train, tab_chat = st.tabs(["Train", "Chat"])
 # ----------------------------
 with tab_train:
     st.subheader("Train the intent classifier")
-    st.write("Upload a CSV with columns: Question, Intent,Canonical).")
+    st.write("Upload a CSV with columns: 'Question', 'Intent','Canonical'")
 
     uploaded = st.file_uploader("Training CSV", type=["csv"])
 
@@ -274,6 +288,12 @@ with tab_chat:
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
+    # Session-only log of fallback queries
+    if "fallback_log" not in st.session_state:
+        st.session_state["fallback_log"] = pd.DataFrame(
+            columns=["query", "intent", "confidence_interval"]
+        )
+
     # Load model from session or disk
     pipeline = st.session_state.get("pipeline")
     le = st.session_state.get("label_encoder")
@@ -306,9 +326,59 @@ with tab_chat:
             st.markdown(user_text)
 
         intent, conf, top3 = predict_intent(pipeline, le, user_text)
-        bot_say(friendly_intent_line(intent, conf))
+
+        if conf < conf_threshold:
+            # log fallback
+            new_row = pd.DataFrame([{
+                "query": user_text,
+                "intent": intent,
+                "confidence_interval": confidence_interval_label(conf),
+            }])
+            st.session_state["fallback_log"] = pd.concat(
+                [st.session_state["fallback_log"], new_row],
+                ignore_index=True,
+            )
+
+            msg = (
+                "I’m not totally sure what you’re asking yet. I will log this so I can improve\n\n"
+                "In the meantime try rephrasing or be more specific (player vs team, offense vs defense, leader vs totals).\n\n"
+                f"My best guess is **{intent}** (**{conf*100:.1f}%**)."
+            )
+            bot_say(msg)
+        else:
+            bot_say(friendly_intent_line(intent, conf))
 
         if show_debug:
             with st.expander("Debug", expanded=False):
                 st.write({"intent": intent, "confidence": conf})
                 st.write({"top3": top3})
+
+
+# ----------------------------
+# Log tab
+# ----------------------------
+with tab_log:
+    st.subheader("Fallback Log")
+    st.caption("Queries are logged here only when the chatbot had to fall back to an unsure response.")
+
+    df_log = st.session_state.get("fallback_log", pd.DataFrame(columns=["query", "intent", "confidence_interval"]))
+
+    if df_log.empty:
+        st.info("No fallback queries yet.")
+    else:
+        # Show newest first
+        df_show = df_log.iloc[::-1].reset_index(drop=True)
+        st.dataframe(df_show, use_container_width=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "Download log as CSV",
+                data=df_show.to_csv(index=False).encode("utf-8"),
+                file_name="fallback_log.csv",
+                mime="text/csv",
+            )
+        with col2:
+            if st.button("Clear log"):
+                st.session_state["fallback_log"] = pd.DataFrame(columns=["query", "intent", "confidence_interval"])
+                st.success("Cleared.")
